@@ -1,0 +1,172 @@
+import streamlit as st
+import pandas as pd
+import sqlite3
+from datetime import datetime
+import plotly.express as px
+
+# --- CONFIGURACIÓN DE LA PÁGINA ---
+st.set_page_config(page_title="Hand's on Burger - Gestión", layout="wide", initial_sidebar_state="expanded")
+
+# --- FUNCIONES DE BASE DE DATOS ---
+def get_connection():
+    # Creamos la conexión a SQLite
+    conn = sqlite3.connect('inventario_burger.db', check_same_thread=False)
+    return conn
+
+def init_db():
+    conn = get_connection()
+    c = conn.cursor()
+    # Tabla de productos
+    c.execute('''CREATE TABLE IF NOT EXISTS productos 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  nombre TEXT NOT NULL, 
+                  tipo TEXT, 
+                  stock REAL, 
+                  unidad TEXT)''')
+    # Tabla de movimientos
+    c.execute('''CREATE TABLE IF NOT EXISTS movimientos 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  producto_id INTEGER, 
+                  tipo_mov TEXT, 
+                  cantidad REAL, 
+                  fecha TEXT, 
+                  FOREIGN KEY(producto_id) REFERENCES productos(id))''')
+    conn.commit()
+    conn.close()
+
+# --- LÓGICA DE NEGOCIO ---
+def agregar_producto(nombre, tipo, stock, unidad):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("INSERT INTO productos (nombre, tipo, stock, unidad) VALUES (?,?,?,?)", 
+              (nombre, tipo, stock, unidad))
+    conn.commit()
+    conn.close()
+
+def obtener_datos(tabla):
+    conn = get_connection()
+    df = pd.read_sql_query(f"SELECT * FROM {tabla}", conn)
+    conn.close()
+    return df
+
+# Inicializar DB al cargar
+init_db()
+
+# --- INTERFAZ DE USUARIO (UI) ---
+
+# Estado de sesión para Login
+if 'auth' not in st.session_state:
+    st.session_state['auth'] = False
+
+def login():
+    st.title("🍔 Hand's on Burger")
+    st.subheader("Control de Inventario Digital")
+    
+    with st.container():
+        user = st.text_input("Usuario")
+        password = st.text_input("Contraseña", type="password")
+        if st.button("Iniciar Sesión"):
+            if user == "admin" and password == "burger2026": # Puedes cambiarla
+                st.session_state['auth'] = True
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos")
+
+if not st.session_state['auth']:
+    login()
+else:
+    # Sidebar
+    st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3075/3075977.png", width=100)
+    st.sidebar.title("Menú Principal")
+    opcion = st.sidebar.radio("Ir a:", 
+        ["Dashboard / Consulta", "Registrar Producto", "Movimientos", "Análisis de Demanda", "Formato A3"])
+
+    if st.sidebar.button("Cerrar Sesión"):
+        st.session_state['auth'] = False
+        st.rerun()
+
+    # --- SECCIÓN: CONSULTA ---
+    if opcion == "Dashboard / Consulta":
+        st.header("📊 Estado del Inventario")
+        df_p = obtener_datos("productos")
+        
+        if df_p.empty:
+            st.info("Aún no hay productos registrados. Ve a la sección 'Registrar Producto'.")
+        else:
+            # Indicadores Rápidos
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Productos", len(df_p))
+            col2.metric("Materia Prima", len(df_p[df_p['tipo'] == 'Materia Prima']))
+            
+            # Alerta de Stock Bajo (Menos de 5 unidades)
+            stock_bajo = df_p[df_p['stock'] < 5]
+            col3.metric("Alertas Stock Bajo", len(stock_bajo), delta_color="inverse")
+
+            if not stock_bajo.empty:
+                st.warning("⚠️ PRODUCTOS CON STOCK CRÍTICO:")
+                st.dataframe(stock_bajo[['nombre', 'stock', 'unidad']])
+
+            st.markdown("---")
+            st.dataframe(df_p, use_container_width=True)
+
+    # --- SECCIÓN: REGISTRO ---
+    elif opcion == "Registrar Producto":
+        st.header("📦 Registro de Insumos")
+        with st.form("nuevo_p"):
+            n = st.text_input("Nombre del Insumo (ej. Carne Angus 150g)")
+            t = st.selectbox("Categoría", ["Materia Prima", "Producto Terminado"])
+            s = st.number_input("Stock Inicial", min_value=0.0, step=1.0)
+            u = st.selectbox("Unidad de Medida", ["Unidades", "Kg", "Gramos", "Litros", "Paquetes"])
+            
+            if st.form_submit_button("Guardar Producto"):
+                if n:
+                    agregar_producto(n, t, s, u)
+                    st.success(f"Producto '{n}' agregado con éxito.")
+                else:
+                    st.error("El nombre es obligatorio.")
+
+    # --- SECCIÓN: MOVIMIENTOS ---
+    elif opcion == "Movimientos":
+        st.header("🔄 Registrar Entradas / Salidas")
+        df_p = obtener_datos("productos")
+        
+        if df_p.empty:
+            st.error("Primero debes registrar productos.")
+        else:
+            with st.form("mov"):
+                p_sel = st.selectbox("Seleccionar Producto", df_p['nombre'].tolist())
+                tipo_m = st.radio("Tipo de movimiento", ["Entrada (Compra)", "Salida (Venta/Merma)"])
+                cant = st.number_input("Cantidad", min_value=0.1, step=0.5)
+                
+                if st.form_submit_button("Ejecutar Movimiento"):
+                    # Lógica para actualizar stock
+                    conn = get_connection()
+                    cur = conn.cursor()
+                    factor = 1 if "Entrada" in tipo_m else -1
+                    cur.execute("UPDATE productos SET stock = stock + ? WHERE nombre = ?", (cant * factor, p_sel))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"Movimiento de {p_sel} registrado.")
+
+    # --- SECCIÓN: ANÁLISIS ---
+    elif opcion == "Análisis de Demanda":
+        st.header("📈 Análisis Visual")
+        df_p = obtener_datos("productos")
+        if not df_p.empty:
+            fig = px.pie(df_p, values='stock', names='nombre', title='Distribución de Insumos')
+            st.plotly_chart(fig)
+        else:
+            st.info("Sin datos suficientes para gráficos.")
+
+    # --- SECCIÓN: FORMATO A3 ---
+    elif opcion == "Formato A3":
+        st.header("📋 Herramienta de Control Visual A3")
+        st.markdown("""
+        ### 1. Causas de Problemas
+        * **Falta de registro:** El personal olvida anotar salidas en horas pico.
+        * **Mermas:** No se identificaba el pan vencido a tiempo.
+        
+        ### 2. Resultados Obtenidos
+        * **Precisión:** Ahora el dueño sabe exactamente cuánto queda de carne sin ir a la cocina.
+        * **Eficiencia:** Se redujo el tiempo de conteo manual de 1 hora a 5 minutos.
+        """)
